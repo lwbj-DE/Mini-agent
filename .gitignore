@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data (runtime generated)
+data/sessions/
+data/logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code
+CLAUDE.md
+演示录制脚本.md
+
+# OS
+.DS_Store
+Thumbs.db
