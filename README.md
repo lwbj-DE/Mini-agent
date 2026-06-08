@@ -2,6 +2,9 @@
 
 一个从零实现的轻量级 AI Agent，支持多轮对话、工具调用、跨轮次状态持久化、MCP 协议。核心 ReAct 循环完全自研，不依赖 LangChain 等 Agent 框架。
 
+# 演示视频
+https://www.bilibili.com/video/BV18wEG6NEQN/?vd_source=dd37b3e7641dc1162a468d0427cc9a35（如果打不开请复制打开
+
 ## 特性
 
 - **自研 ReAct 循环**：Think → Act → Observe，不依赖 LangChain / OpenHands 等框架
