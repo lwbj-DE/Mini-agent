@@ -1,0 +1,39 @@
+# ============================================================
+# Mini Agent — 工具配置
+# 修改后调用 POST /api/tools/reload 即可热重载，无需重启
+# ============================================================
+
+# ========== MCP 服务器 ==========
+mcp_servers:
+  # stdio 模式：启动本地子进程
+  - name: demo
+    transport: stdio
+    command: python
+    args: [mcp_servers/demo_server.py]
+    enabled: true
+
+  # HTTP 模式示例（需服务端运行）
+  # - name: remote-tools
+  #   transport: streamable-http
+  #   url: http://localhost:8003/mcp
+  #   enabled: false
+
+# ========== 本地工具 ==========
+tools:
+  - name: calculator
+    enabled: true
+    module: backend.tools.calculator
+    class: CalculatorTool
+    description: 安全数学表达式计算器，支持三角函数、对数、阶乘等
+
+  - name: search
+    enabled: true
+    module: backend.tools.search
+    class: SearchTool
+    description: 内置知识库搜索（可替换为真实搜索 API）
+
+  - name: todo
+    enabled: true
+    module: backend.tools.todo
+    class: TodoTool
+    description: 有状态任务管理器，支持跨轮次持久化
