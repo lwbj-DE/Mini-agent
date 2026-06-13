@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     compression_enabled: bool = True
     compression_trigger_fraction: float = 0.7  # 70% of model max
     compression_keep_messages: int = 20        # keep recent N messages
+    compression_summary_max_chars: int = 500   # max chars for rolling summary
     model_max_input_tokens: int = 32768        # MiMo v2.5 context window
 
     # -- Paths ---------------------------------------------------------
