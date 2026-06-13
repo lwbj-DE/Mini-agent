@@ -192,6 +192,14 @@ class ReactMode:
     # context compression
     # ------------------------------------------------------------------
 
+    # -- system-message prefixes for two-tier compression -----------------
+    _FACT_PREFIX = "📋 已记录事实"
+    _SUMMARY_PREFIX = "📝 对话摘要"
+
+    # ------------------------------------------------------------------
+    # context compression (two-tier)
+    # ------------------------------------------------------------------
+
     def _maybe_compress(self, session, session_id, step):
         if not self._cfg.compression_enabled:
             return
@@ -211,35 +219,130 @@ class ReactMode:
             f"(估算 {est}/{self._cfg.model_max_input_tokens} tokens)"
         )
         try:
-            summary = self._generate_summary(to_compress)
-            session.messages = [
-                {"role": "system", "content": f"[对话摘要] {summary}"}
-            ] + recent
-            logger.info(f"[{session_id}] 压缩完成: {len(to_compress)} 条 → {len(summary)} 字符")
+            # Extract existing memory layers from previous compressions
+            existing_facts, existing_summary = self._extract_existing_memory(to_compress)
+
+            # Tier 1: Extract and merge background facts (cumulative, never overwritten)
+            fact_memory = self._extract_and_merge_facts(to_compress, existing_facts)
+
+            # Tier 2: Generate rolling conversation summary
+            rolling_summary = self._generate_rolling_summary(to_compress, existing_summary)
+
+            # Build new message list: fact_memory → summary → recent
+            new_messages: list[dict] = []
+            if fact_memory:
+                new_messages.append({"role": "system", "content": fact_memory})
+            if rolling_summary:
+                new_messages.append({"role": "system", "content": rolling_summary})
+            session.messages = new_messages + recent
+
+            logger.info(
+                f"[{session_id}] 压缩完成: {len(to_compress)} 条 → "
+                f"事实 {len(fact_memory)} 字符 + 摘要 {len(rolling_summary)} 字符"
+            )
         except Exception as exc:
             logger.warning(f"[{session_id}] 压缩失败，跳过: {exc}")
 
-    def _generate_summary(self, messages):
-        summary_prompt = (
-            "将以下对话历史浓缩为一段简短的中文摘要（不超过200字），"
-            "保留关键信息：用户的需求、已完成的任务、未完成的任务、"
-            "重要决策和结论。"
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _extract_existing_memory(self, messages: list[dict]) -> tuple[str, str]:
+        """Scan system messages for previously persisted fact memory and summary."""
+        facts = ""
+        summary = ""
+        for m in messages:
+            if m.get("role") != "system":
+                continue
+            content = m.get("content", "")
+            if content.startswith(self._FACT_PREFIX):
+                facts = content
+            elif content.startswith(self._SUMMARY_PREFIX) or content.startswith("[对话摘要]"):
+                summary = content
+        return facts, summary
+
+    def _extract_and_merge_facts(self, messages: list[dict], existing_facts: str) -> str:
+        """Extract background facts from messages and merge with existing fact memory.
+
+        Facts include: names, project names, tech stack choices, metrics/numbers,
+        personal preferences, org structure, business context — anything the user
+        shared that is NOT a task or to-do.
+        """
+        prompt = (
+            "从以下对话中提取用户分享过的所有背景事实信息，"
+            "包括但不限于：人名、项目名称、技术选型、数字指标、"
+            "个人偏好、组织架构、业务背景。\n\n"
+            "要求：\n"
+            "1. 保留原话中的具体名称和数字，不要泛化（如「张明远」不要写成「某同事」）\n"
+            "2. 只记录事实，不要记录任务进度或对话流程\n"
+            "3. 用简洁的要点形式输出，每行一个事实\n"
+            "4. 如果信息在对话中被否定或更新过，记录最新状态"
+        )
+        if existing_facts:
+            # Strip prefix for cleaner context
+            clean = existing_facts
+            if clean.startswith(self._FACT_PREFIX):
+                clean = clean[len(self._FACT_PREFIX):].lstrip("：:\n ")
+            prompt += (
+                f"\n\n以下是之前已记录的事实，请合并："
+                f"新增的事实补充进去，不变的事实保留原文，"
+                f"有冲突的以新信息为准。\n\n{clean}"
+            )
+
+        user_content = json.dumps(
+            [{"role": m.get("role", "?"), "content": m.get("content", "")[:500]}
+             for m in messages if m.get("role") in ("user", "assistant")],
+            ensure_ascii=False,
         )
         try:
             response = self.llm.chat(
                 messages=[
-                    {"role": "system", "content": summary_prompt},
-                    {"role": "user", "content": json.dumps(
-                        [{"role": m.get("role", "?"), "content": m.get("content", "")[:300]}
-                         for m in messages if m.get("role") in ("user", "assistant")][-30:],
-                        ensure_ascii=False,
-                    )},
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content},
                 ],
             )
-            return response.choices[0].message.content.strip()[:500]
+            facts = response.choices[0].message.content.strip()
+            return f"{self._FACT_PREFIX}：\n{facts}"
         except Exception:
-            user_msgs = [m.get("content", "") for m in messages if m.get("role") == "user"]
-            return "用户历史问题: " + "; ".join(u[:80] for u in user_msgs[-5:])
+            logger.warning("事实提取失败，保留已有事实")
+            return existing_facts
+
+    def _generate_rolling_summary(self, messages: list[dict], existing_summary: str) -> str:
+        """Generate a rolling conversation summary focusing on task progress.
+
+        Background facts are handled separately by _extract_and_merge_facts,
+        so this summary only needs to cover task flow.
+        """
+        max_chars = self._cfg.compression_summary_max_chars
+        prompt = (
+            f"将以下对话历史浓缩为一段中文摘要（不超过{max_chars}字）。\n"
+            "保留：用户的需求、任务进展、待办事项、重要决策和结论。\n"
+            "注意：用户的背景事实（人名、项目名、技术选型等）已单独记录，"
+            "摘要中不需要重复。"
+        )
+        if existing_summary:
+            clean = existing_summary
+            for pfx in (self._SUMMARY_PREFIX + "：", self._SUMMARY_PREFIX + ":", "[对话摘要] "):
+                clean = clean.replace(pfx, "")
+            prompt += f"\n\n之前的对话摘要（请合并）：{clean}"
+
+        user_content = json.dumps(
+            [{"role": m.get("role", "?"), "content": m.get("content", "")[:300]}
+             for m in messages if m.get("role") in ("user", "assistant")][-30:],
+            ensure_ascii=False,
+        )
+        try:
+            response = self.llm.chat(
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            summary = response.choices[0].message.content.strip()[: max_chars + 100]
+            return f"{self._SUMMARY_PREFIX}：{summary}"
+        except Exception:
+            logger.warning("摘要生成失败，保留已有摘要")
+            return existing_summary or f"{self._SUMMARY_PREFIX}：（压缩失败）"
 
     # ------------------------------------------------------------------
     # max-steps feedback
